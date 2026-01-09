@@ -6,7 +6,10 @@ A Monte Carlo simulation framework for discovering optimal decision-making strat
 Overview
 
 This project uses extensive Monte Carlo simulation (100,000+ iterations per decision point) to identify optimal actions across 64 distinct game states. The resulting policy achieves significant competitive advantages:
-PlayersBaselinePolicy Win RateEdge250.0%59.2%+9.2%333.3%39.4%+6.1%425.0%29.8%+4.8%
+PlayersBaselinePolicy Win Rate Edge
+50.0%     59.2%     +9.2%
+33.3%     39.4%     +6.1%
+25.0%     29.8%     +4.8%
 
 Key Strategic Findings
 
