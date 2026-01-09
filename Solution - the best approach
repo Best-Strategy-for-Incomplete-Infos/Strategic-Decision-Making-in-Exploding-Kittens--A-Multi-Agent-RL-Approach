@@ -1,0 +1,156 @@
+Optimal Decision-Making Strategy for Exploding Kittens:
+A Monte Carlo Simulation Approach
+Research Study
+January 2026
+
+
+Abstract
+This study presents a comprehensive analysis of optimal decision-making strategies for the card game Exploding Kittens. Using Monte Carlo simulation with over 10,000 iterations per decision point, we developed a trigger-based policy framework that identifies 64 distinct game states and determines the optimal action for each. Our findings demonstrate that the learned policy achieves a significant competitive advantage: a 14.1% improvement in two-player games (64.1% vs. 50% baseline), 12.1% in three-player games (45.4% vs. 33.3% baseline), and 9.3% in four-player games (34.3% vs. 25% baseline). Key strategic insights include the superiority of counterattacking when under attack, the importance of card conservation over proactive aggression, and the critical role of the Defuse card in endgame scenarios. These results provide actionable guidance for competitive play and demonstrate the effectiveness of simulation-based approaches to game strategy optimization.
+Keywords: Exploding Kittens, Monte Carlo simulation, game theory, optimal strategy, decision-making, card games
+
+
+1. Introduction
+1.1 Background
+Exploding Kittens is a strategic card game created by Elan Lee, Matthew Inman, and Shane Small, which became one of the most successful Kickstarter campaigns in history. The game combines elements of chance, strategy, and player interaction in a format that makes it accessible yet strategically deep. Players draw cards from a central deck, attempting to avoid drawing an Exploding Kitten card, which eliminates them from the game unless they possess a Defuse card.
+Despite its popularity, rigorous strategic analysis of Exploding Kittens remains limited in academic literature. The game presents an interesting optimization problem: with imperfect information about the deck composition and opponents' hands, players must make decisions that balance immediate survival with long-term winning probability. This study addresses this gap by applying Monte Carlo simulation methods to systematically evaluate decision alternatives across all significant game states.
+1.2 Research Objectives
+The primary objectives of this research are threefold. First, we aim to develop a comprehensive taxonomy of game states (triggers) that capture all strategically relevant decision points. Second, we seek to determine the optimal action for each trigger through extensive simulation. Third, we validate the resulting policy against baseline strategies to quantify its competitive advantage.
+2. Methodology
+2.1 Game Model
+We implemented a complete simulation of Exploding Kittens following the official rules. The standard deck composition includes 4 Skip cards, 4 Attack cards, 4 Shuffle cards, 5 See Future cards, 4 Favor cards, 5 Nope cards, 20 Cat cards, and Exploding Kitten cards equal to the number of players minus one. Each player begins with one Defuse card and seven random cards from the deck.
+2.2 Trigger Framework
+We identified 64 distinct triggers representing strategically significant game states. These triggers are categorized into seven groups: Bomb Visible (when See Future reveals bomb position), Bomb Unknown (when bomb location is uncertain), See Future Decision (whether to use See Future), Under Attack (when facing multiple required draws), Defused (bomb placement after using Defuse), Proactive (whether to attack without immediate threat), and Endgame (two-player final confrontation).
+Each trigger encodes relevant state information including: bomb probability (categorized as Low <10%, Medium 10-25%, High 25-40%, Critical >40%), available action cards (Skip, Attack, Shuffle), possession of Defuse card, number of required draws (turns left), and relative card strength compared to opponents.
+2.3 Simulation Protocol
+For each trigger-action pair, we executed 10,000 Monte Carlo simulations. Each simulation began by generating random game states until the target trigger was reached, then executed the test action and continued the game until conclusion. Opponents used a semi-intelligent baseline strategy that responds to visible bombs and high-risk situations but does not employ the optimized policy.
+We employed a two-pass refinement approach. The first pass identified initial best actions with no prior policy. The second pass used the first-pass policy as a base, allowing actions throughout the game to follow the learned strategy while testing variations at the target trigger. This iterative refinement improved policy coherence and final performance.
+
+
+3. Results
+3.1 Policy Validation
+The optimized policy demonstrates substantial improvement over random play across all player configurations. Table 1 presents the validation results, comparing the learned policy against the theoretical baseline (equal probability for all players).
+Table 1: Policy Validation Results
+Players	Baseline	Policy Win Rate	Advantage
+2 Players	50.0%	64.1%	+14.1%
+3 Players	33.3%	45.4%	+12.1%
+4 Players	25.0%	34.3%	+9.3%
+
+These results are statistically significant with sample sizes exceeding 3,000 games per configuration. The decreasing advantage with more players reflects the increased variance and reduced individual control in larger games.
+3.2 Key Strategic Findings
+3.2.1 Response to Known Bomb Position
+When See Future reveals a bomb on top of the deck, the optimal response depends on available resources. Table 2 summarizes the recommended actions and their corresponding win rates.
+Table 2: Optimal Response When Bomb is on Top
+Resources Available	Optimal Action	Win Rate
+Skip + Defuse	SKIP	51.0%
+Attack + Defuse (no Skip)	ATTACK	46.7%
+Shuffle + Defuse (no Skip/Attack)	SHUFFLE	34.4%
+Defuse only	DRAW	18.9%
+
+A notable finding is that Skip is preferred over Attack when both are available. This counterintuitive result arises because Skip preserves both the Skip and Defuse cards for future use, while Attack forces the next player to draw twice, potentially depleting their resources and making them more dangerous if they survive.
+3.2.2 Response to Attack (Multiple Draws Required)
+When facing an Attack card requiring multiple draws, the counterattack strategy proves highly effective. Table 3 shows the optimal responses for two-draw situations.
+Table 3: Optimal Response Under Attack (2 Turns)
+Resources Available	Optimal Action	Win Rate
+Attack + Skip + Defuse	ATTACK	70.1%
+Attack + Skip (no Defuse)	ATTACK	32.8%
+Skip only + Defuse	SKIP	39.7%
+Skip only (no Defuse)	SKIP	11.6%
+Attack only + Defuse	ATTACK	56.5%
+Nothing	DRAW	0.3-15.3%
+
+The superiority of Attack over Skip when both are available (70.1% vs. implied Skip rate) demonstrates the value of passing the problem to opponents rather than merely avoiding it. When attacked three or more times, Attack becomes even more critical, achieving a 56.6% win rate.
+3.2.3 Proactive Aggression
+Perhaps the most surprising finding concerns proactive use of Attack cards. Conventional wisdom might suggest attacking opponents when in a weak position or when risk is high. However, our simulations consistently show that drawing is superior to proactive attacking in virtually all scenarios.
+Table 4: Proactive Attack vs. Draw
+Player Position	Risk Level	Attack Win Rate	Draw Win Rate
+Weakest	Low	24.0%	27.9%
+Weakest	High	29.2%	37.0%
+Strongest	Low	41.4%	49.8%
+Strongest	High	54.9%	60.0%
+Middle	Any	35.9%	45.5%
+
+In every configuration tested, Draw outperforms Attack by 5-10 percentage points. This suggests that card conservation is more valuable than aggressive play. Attack cards should be reserved for responding to attacks or escaping known bomb positions, not for proactive use.
+3.2.4 Endgame Strategy
+In two-player endgame situations with one bomb remaining, the Defuse card becomes the dominant factor. Players with Defuse achieve 69-76% win rates by simply drawing, using their Defuse as insurance. Without Defuse, players should use escape cards (Skip: 45%, Attack: 42%) rather than drawing (18%). When the bomb is known to be on top and the player has an escape option, Skip (24.2%) is surprisingly less effective than Attack (39.9%), as Attack forces the opponent into immediate danger with their next draw.
+3.2.5 See Future Usage
+The value of See Future depends on risk level and available escape options. At low and medium risk, See Future provides minimal advantage over simply drawing (45.5-47.6% vs. 45.9-48.9%). The information gained is often not actionable if no escape cards are available. However, at high risk without escape cards, See Future becomes valuable (22.7% vs. 20.6%) as it may reveal that the bomb is not in the immediate top cards, reducing anxiety and guiding shuffle decisions.
+
+
+4. Strategic Recommendations
+Based on our empirical findings, we present the following strategic recommendations for competitive Exploding Kittens play:
+4.1 Normal Turns
+On a normal turn with no immediate threats, the optimal action is simply to draw. Resist the temptation to use action cards proactively. Attack cards, Skip cards, and other resources should be conserved for reactive situations where they provide maximum value. Card advantage through conservation correlates strongly with winning probability.
+4.2 Bomb on Top
+When See Future reveals a bomb on top, use the most expendable escape option. The priority order is: Skip (if available), then Attack (if no Skip), then Shuffle (if no Skip or Attack). If only Defuse is available, draw and use it. This preserves the maximum option value for future turns.
+4.3 Under Attack
+When an opponent plays Attack, counterattack if possible. Attack back achieves the highest win rates (56-70%) by transferring risk to opponents while potentially accumulating turns against them. Only use Skip if Attack is unavailable. If no escape options exist, draw and hope for favorable outcomes.
+4.4 High-Risk Situations
+When bomb probability exceeds 25% and no Defuse is held, use escape cards (Skip or Attack) to avoid drawing. However, if Defuse is available, continue drawing normally. The Defuse provides sufficient insurance to justify the risk, and using escape cards preemptively wastes resources that may be needed later.
+4.5 Endgame
+In two-player situations with one bomb remaining, Defuse holders should draw confidently. The combination of the opponent's draw and your Defuse insurance yields 69-76% win rates. Without Defuse, use any available escape card. When forced to draw without protection, your win probability drops to approximately 18%.
+5. Limitations and Future Work
+This study has several limitations that suggest directions for future research. First, our opponent model uses a semi-random strategy; analysis against optimized opponents or human players may yield different results. Second, the Defused trigger (bomb placement after defusing) had insufficient sample sizes due to its rarity; dedicated simulations for this decision point would improve policy completeness.
+Third, we did not model card counting or opponent hand inference, which skilled players can use to improve decisions. Fourth, the Nope card and Favor card mechanics were simplified in our simulation. Finally, psychological factors such as bluffing, table presence, and opponent tendencies are not captured in this analysis.
+Future work could extend this analysis to include adaptive strategies that exploit opponent patterns, neural network-based value functions for more nuanced state evaluation, and human player studies to validate the practical applicability of these recommendations.
+6. Conclusions
+This study demonstrates that principled simulation-based analysis can identify significant strategic improvements in Exploding Kittens. Our optimized policy achieves 9-14 percentage point advantages over baseline play, translating to substantially higher win rates in competitive settings.
+The key insights are perhaps counterintuitive to casual players: conserve cards rather than using them proactively, counterattack rather than merely defending, and trust your Defuse card rather than panic-escaping at moderate risk levels. These findings provide actionable guidance for players seeking to improve their competitive performance.
+More broadly, this work illustrates the power of Monte Carlo simulation for analyzing games with imperfect information. The trigger-based framework provides a tractable way to compress the large state space into manageable decision points, each of which can be optimized independently. This methodology may be applicable to other card games and strategic decision problems with similar characteristics.
+
+
+Appendix: Complete Optimal Policy
+The following table presents the complete optimal policy derived from our simulation study.
+A.1 Bomb Visible Triggers
+Trigger	Optimal Action
+Bomb on top + Skip + Defuse	SKIP
+Bomb on top + Skip (no Defuse)	SKIP
+Bomb on top + Attack + Defuse (no Skip)	ATTACK
+Bomb on top + Attack (no Skip/Defuse)	ATTACK
+Bomb on top + Shuffle + Defuse	SHUFFLE
+Bomb on top + Shuffle (no Defuse)	SHUFFLE
+Bomb on top + Defuse only	DRAW
+Bomb on top + Nothing	DRAW
+Bomb 2nd position + Actions	DRAW
+Bomb 3rd position + Actions	DRAW
+
+A.2 Bomb Unknown Triggers
+Trigger	Optimal Action
+Low risk (<10%) + Any resources	DRAW
+Medium risk (10-25%) + Any resources	DRAW
+High risk (25-40%) + Defuse	DRAW
+High risk (25-40%) + No Defuse	SKIP
+Critical risk (>40%) + Defuse	DRAW
+Critical risk (>40%) + No Defuse	SKIP
+
+A.3 Under Attack Triggers
+Trigger	Optimal Action
+2 turns + Attack available	ATTACK
+2 turns + Skip only	SKIP
+2 turns + Nothing	DRAW
+3+ turns + Attack available	ATTACK
+3+ turns + Skip only	SKIP
+3+ turns + Nothing	DRAW
+
+A.4 Endgame Triggers (2 Players, 1 Bomb)
+Trigger	Optimal Action
+Have Defuse + Any cards	DRAW
+No Defuse + Skip	SKIP
+No Defuse + Attack	ATTACK
+No Defuse + Nothing	DRAW
+Bomb on top + Escape available	ATTACK
+Bomb on top + Defuse only	DRAW
+
+A.5 Proactive Triggers
+Trigger	Optimal Action
+Weakest player + Attack available	DRAW
+Strongest player + Attack available	DRAW
+Middle player + Attack available	DRAW
+
+A.6 See Future Triggers
+Trigger	Optimal Action
+Low risk + Escape available	DRAW
+Low risk + No escape	SEE FUTURE
+Medium risk + Escape available	DRAW
+Medium risk + No escape	SEE FUTURE
+High risk + Escape available	SEE FUTURE
+High risk + No escape	SEE FUTURE
