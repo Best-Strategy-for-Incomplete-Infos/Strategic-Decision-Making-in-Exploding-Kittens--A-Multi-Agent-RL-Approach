@@ -1,0 +1,1056 @@
+import random
+from enum import Enum, auto
+from typing import List, Dict, Tuple, Optional
+from dataclasses import dataclass, field
+from collections import defaultdict
+import json
+import time
+
+
+# ============================================================
+# GAME ENGINE
+# ============================================================
+
+class Card(Enum):
+    BOMB = auto()
+    DEFUSE = auto()
+    SKIP = auto()
+    ATTACK = auto()
+    SHUFFLE = auto()
+    SEE_FUTURE = auto()
+    FAVOR = auto()
+    NOPE = auto()
+    CAT = auto()
+
+
+@dataclass
+class Player:
+    id: int
+    hand: Dict[Card, int] = field(default_factory=dict)
+    is_alive: bool = True
+    
+    def count(self, c: Card) -> int:
+        return self.hand.get(c, 0)
+    
+    def has(self, c: Card) -> bool:
+        return self.count(c) > 0
+    
+    def remove(self, c: Card) -> bool:
+        if self.has(c):
+            self.hand[c] -= 1
+            if self.hand[c] == 0:
+                del self.hand[c]
+            return True
+        return False
+    
+    def add(self, c: Card):
+        self.hand[c] = self.hand.get(c, 0) + 1
+    
+    def total(self) -> int:
+        return sum(self.hand.values())
+    
+    def copy(self) -> 'Player':
+        p = Player(self.id)
+        p.hand = self.hand.copy()
+        p.is_alive = self.is_alive
+        return p
+
+
+class Game:
+    def __init__(self, num_players: int):
+        self.num_players = num_players
+        self.players: List[Player] = []
+        self.deck: List[Card] = []
+        self.discard: List[Card] = []
+        self.current_idx: int = 0
+        self.turns_left: int = 1
+        self.known_top: List[Card] = []
+        self.winner: Optional[int] = None
+        # NEW: Track pending placement decision
+        self.pending_defuse: bool = False
+        self.pending_bomb: bool = False
+    
+    def setup(self):
+        deck_cards = (
+            [Card.SKIP] * 4 +
+            [Card.ATTACK] * 4 +
+            [Card.SHUFFLE] * 4 +
+            [Card.SEE_FUTURE] * 5 +
+            [Card.FAVOR] * 4 +
+            [Card.NOPE] * 5 +
+            [Card.CAT] * 20
+        )
+        random.shuffle(deck_cards)
+        
+        self.players = [Player(i) for i in range(self.num_players)]
+        for p in self.players:
+            p.add(Card.DEFUSE)
+            for _ in range(7):
+                if deck_cards:
+                    p.add(deck_cards.pop())
+        
+        deck_cards.extend([Card.DEFUSE] * 2)
+        deck_cards.extend([Card.BOMB] * (self.num_players - 1))
+        random.shuffle(deck_cards)
+        
+        self.deck = deck_cards
+        self.discard = []
+        self.current_idx = 0
+        self.turns_left = 1
+        self.known_top = []
+        self.winner = None
+        self.pending_defuse = False
+        self.pending_bomb = False
+    
+    def copy(self) -> 'Game':
+        g = Game(self.num_players)
+        g.players = [p.copy() for p in self.players]
+        g.deck = self.deck.copy()
+        g.discard = self.discard.copy()
+        g.current_idx = self.current_idx
+        g.turns_left = self.turns_left
+        g.known_top = self.known_top.copy()
+        g.winner = self.winner
+        g.pending_defuse = self.pending_defuse
+        g.pending_bomb = self.pending_bomb
+        return g
+    
+    def is_over(self) -> bool:
+        return self.winner is not None
+    
+    def alive_players(self) -> List[Player]:
+        return [p for p in self.players if p.is_alive]
+    
+    def bombs_in_deck(self) -> int:
+        return sum(1 for c in self.deck if c == Card.BOMB)
+    
+    def bomb_prob(self) -> float:
+        if not self.deck:
+            return 0.0
+        return self.bombs_in_deck() / len(self.deck)
+    
+    def current_player(self) -> Player:
+        alive = self.alive_players()
+        if not alive:
+            return None
+        return alive[self.current_idx % len(alive)]
+    
+    def next_player_idx(self) -> int:
+        alive = self.alive_players()
+        if not alive:
+            return 0
+        return (self.current_idx + 1) % len(alive)
+    
+    def advance_turn(self):
+        self.turns_left -= 1
+        if self.turns_left <= 0:
+            self.current_idx = self.next_player_idx()
+            self.turns_left = 1
+    
+    def eliminate(self, player: Player):
+        player.is_alive = False
+        alive = self.alive_players()
+        if len(alive) == 1:
+            self.winner = alive[0].id
+        elif len(alive) == 0:
+            self.winner = -1  # Draw
+        elif self.current_idx >= len(alive):
+            self.current_idx = 0
+    
+    def draw_card(self, player: Player) -> Tuple[Card, bool]:
+        """
+        Draw a card. 
+        Returns (card_drawn, exploded).
+        If bomb + defuse: sets pending_defuse = True for placement decision.
+        """
+        if not self.deck:
+            return None, False
+        
+        card = self.deck.pop()
+        self.known_top = []
+        
+        if card == Card.BOMB:
+            if player.has(Card.DEFUSE):
+                player.remove(Card.DEFUSE)
+                self.discard.append(Card.DEFUSE)
+                self.pending_defuse = True
+                self.pending_bomb = True
+                # Bomb will be placed by place_bomb()
+                return card, False
+            else:
+                self.eliminate(player)
+                return card, True
+        else:
+            player.add(card)
+            return card, False
+    
+    def place_bomb(self, position: int):
+        """Place bomb at position (0 = top of deck, len = bottom)."""
+        if self.pending_bomb:
+            pos = max(0, min(position, len(self.deck)))
+            self.deck.insert(pos, Card.BOMB)
+            self.pending_defuse = False
+            self.pending_bomb = False
+    
+    def place_bomb_for_player(self, target_steps: int):
+        """Place bomb to target player N steps away."""
+        alive_count = len(self.alive_players())
+        if alive_count <= 1:
+            self.place_bomb(0)
+            return
+        
+        # Position so that target draws it
+        # target_steps = 1 means next player, 2 means player after that, etc.
+        pos = len(self.deck) - target_steps + 1
+        pos = max(0, min(pos, len(self.deck)))
+        self.place_bomb(pos)
+    
+    def peek_top(self, n: int = 3) -> List[Card]:
+        return list(reversed(self.deck[-n:])) if len(self.deck) >= n else list(reversed(self.deck))
+    
+    def bomb_on_top(self) -> bool:
+        return len(self.known_top) > 0 and self.known_top[0] == Card.BOMB
+    
+    def bomb_in_top_n(self, n: int) -> int:
+        for i, c in enumerate(self.known_top[:n]):
+            if c == Card.BOMB:
+                return i + 1
+        return 0
+    
+    # --- Actions ---
+    
+    def play_skip(self, player: Player) -> bool:
+        if not player.remove(Card.SKIP):
+            return False
+        self.discard.append(Card.SKIP)
+        self.advance_turn()
+        return True
+    
+    def play_attack(self, player: Player) -> bool:
+        if not player.remove(Card.ATTACK):
+            return False
+        self.discard.append(Card.ATTACK)
+        self.current_idx = self.next_player_idx()
+        self.turns_left = self.turns_left + 1 if self.turns_left > 0 else 2
+        return True
+    
+    def play_shuffle(self, player: Player) -> bool:
+        if not player.remove(Card.SHUFFLE):
+            return False
+        self.discard.append(Card.SHUFFLE)
+        random.shuffle(self.deck)
+        self.known_top = []
+        return True
+    
+    def play_see_future(self, player: Player) -> bool:
+        if not player.remove(Card.SEE_FUTURE):
+            return False
+        self.discard.append(Card.SEE_FUTURE)
+        self.known_top = self.peek_top(3)
+        return True
+
+
+# ============================================================
+# TRIGGERS AND ACTIONS
+# ============================================================
+
+class Trigger(Enum):
+    # Bomb Visible
+    BOMB_TOP_SKIP_DEFUSE = auto()
+    BOMB_TOP_SKIP_NO_DEFUSE = auto()
+    BOMB_TOP_NO_SKIP_ATTACK_DEFUSE = auto()
+    BOMB_TOP_NO_SKIP_ATTACK_NO_DEFUSE = auto()
+    BOMB_TOP_NO_SKIP_NO_ATTACK_SHUFFLE_DEFUSE = auto()
+    BOMB_TOP_NO_SKIP_NO_ATTACK_SHUFFLE_NO_DEFUSE = auto()
+    BOMB_TOP_NOTHING_DEFUSE = auto()
+    BOMB_TOP_NOTHING_NO_DEFUSE = auto()
+    BOMB_2ND_HAS_ACTIONS = auto()
+    BOMB_2ND_NO_ACTIONS = auto()
+    BOMB_3RD_HAS_ACTIONS = auto()
+    BOMB_3RD_NO_ACTIONS = auto()
+    
+    # Bomb Unknown by Risk
+    UNKNOWN_LOW_ESCAPE_DEFUSE = auto()
+    UNKNOWN_LOW_ESCAPE_NO_DEFUSE = auto()
+    UNKNOWN_LOW_NO_ESCAPE_DEFUSE = auto()
+    UNKNOWN_LOW_NO_ESCAPE_NO_DEFUSE = auto()
+    UNKNOWN_MED_ESCAPE_DEFUSE = auto()
+    UNKNOWN_MED_ESCAPE_NO_DEFUSE = auto()
+    UNKNOWN_MED_NO_ESCAPE_DEFUSE = auto()
+    UNKNOWN_MED_NO_ESCAPE_NO_DEFUSE = auto()
+    UNKNOWN_HIGH_ESCAPE_DEFUSE = auto()
+    UNKNOWN_HIGH_ESCAPE_NO_DEFUSE = auto()
+    UNKNOWN_HIGH_NO_ESCAPE_DEFUSE = auto()
+    UNKNOWN_HIGH_NO_ESCAPE_NO_DEFUSE = auto()
+    UNKNOWN_CRIT_ESCAPE_DEFUSE = auto()
+    UNKNOWN_CRIT_ESCAPE_NO_DEFUSE = auto()
+    UNKNOWN_CRIT_NO_ESCAPE_DEFUSE = auto()
+    UNKNOWN_CRIT_NO_ESCAPE_NO_DEFUSE = auto()
+    
+    # See Future Decision
+    SEE_LOW_ESCAPE = auto()
+    SEE_LOW_NO_ESCAPE = auto()
+    SEE_MED_ESCAPE = auto()
+    SEE_MED_NO_ESCAPE = auto()
+    SEE_HIGH_ESCAPE = auto()
+    SEE_HIGH_NO_ESCAPE = auto()
+    
+    # Under Attack
+    ATTACKED_2_SKIP_ATTACK_DEFUSE = auto()
+    ATTACKED_2_SKIP_ATTACK_NO_DEFUSE = auto()
+    ATTACKED_2_SKIP_NO_ATTACK_DEFUSE = auto()
+    ATTACKED_2_SKIP_NO_ATTACK_NO_DEFUSE = auto()
+    ATTACKED_2_NO_SKIP_ATTACK_DEFUSE = auto()
+    ATTACKED_2_NO_SKIP_ATTACK_NO_DEFUSE = auto()
+    ATTACKED_2_NOTHING_DEFUSE = auto()
+    ATTACKED_2_NOTHING_NO_DEFUSE = auto()
+    ATTACKED_3PLUS_ATTACK = auto()
+    ATTACKED_3PLUS_SKIP_NO_ATTACK = auto()
+    ATTACKED_3PLUS_NOTHING = auto()
+    
+    # Defused - Placement (FIX: Now actually used)
+    DEFUSED_2P = auto()
+    DEFUSED_3P = auto()
+    DEFUSED_4P = auto()
+    DEFUSED_5P = auto()
+    
+    # Proactive
+    PROACTIVE_WEAKEST_ATTACK_LOW = auto()
+    PROACTIVE_WEAKEST_ATTACK_HIGH = auto()
+    PROACTIVE_STRONGEST_ATTACK_LOW = auto()
+    PROACTIVE_STRONGEST_ATTACK_HIGH = auto()
+    PROACTIVE_MIDDLE_ATTACK = auto()
+    
+    # Endgame
+    ENDGAME_DEFUSE_SKIP_ATTACK = auto()
+    ENDGAME_DEFUSE_SKIP = auto()
+    ENDGAME_DEFUSE_ATTACK = auto()
+    ENDGAME_DEFUSE_ONLY = auto()
+    ENDGAME_NO_DEFUSE_SKIP = auto()
+    ENDGAME_NO_DEFUSE_ATTACK = auto()
+    ENDGAME_NO_DEFUSE_NOTHING = auto()
+    ENDGAME_BOMB_TOP_ESCAPE = auto()
+    ENDGAME_BOMB_TOP_DEFUSE = auto()
+    ENDGAME_BOMB_TOP_NOTHING = auto()
+
+
+class Action(Enum):
+    DRAW = auto()
+    SKIP = auto()
+    ATTACK = auto()
+    SHUFFLE = auto()
+    SEE_FUTURE = auto()
+    # Placement actions (FIX: Now implemented)
+    PLACE_TOP = auto()      # Position for next player
+    PLACE_2ND = auto()      # Skip 1, hit player after next
+    PLACE_3RD = auto()      # Skip 2
+    PLACE_MIDDLE = auto()   # Random middle
+    PLACE_BOTTOM = auto()   # Safe, far future
+
+
+# Trigger -> List of valid actions
+TRIGGER_ACTIONS: Dict[Trigger, List[Action]] = {
+    # Bomb Visible
+    Trigger.BOMB_TOP_SKIP_DEFUSE: [Action.DRAW, Action.SKIP, Action.ATTACK],
+    Trigger.BOMB_TOP_SKIP_NO_DEFUSE: [Action.SKIP],
+    Trigger.BOMB_TOP_NO_SKIP_ATTACK_DEFUSE: [Action.DRAW, Action.ATTACK],
+    Trigger.BOMB_TOP_NO_SKIP_ATTACK_NO_DEFUSE: [Action.ATTACK],
+    Trigger.BOMB_TOP_NO_SKIP_NO_ATTACK_SHUFFLE_DEFUSE: [Action.DRAW, Action.SHUFFLE],
+    Trigger.BOMB_TOP_NO_SKIP_NO_ATTACK_SHUFFLE_NO_DEFUSE: [Action.SHUFFLE],
+    Trigger.BOMB_TOP_NOTHING_DEFUSE: [Action.DRAW],
+    Trigger.BOMB_TOP_NOTHING_NO_DEFUSE: [Action.DRAW],
+    Trigger.BOMB_2ND_HAS_ACTIONS: [Action.DRAW, Action.SKIP, Action.ATTACK],
+    Trigger.BOMB_2ND_NO_ACTIONS: [Action.DRAW],
+    Trigger.BOMB_3RD_HAS_ACTIONS: [Action.DRAW, Action.SKIP, Action.ATTACK],
+    Trigger.BOMB_3RD_NO_ACTIONS: [Action.DRAW],
+    
+    # Bomb Unknown
+    Trigger.UNKNOWN_LOW_ESCAPE_DEFUSE: [Action.DRAW, Action.SKIP, Action.ATTACK],
+    Trigger.UNKNOWN_LOW_ESCAPE_NO_DEFUSE: [Action.DRAW, Action.SKIP, Action.ATTACK],
+    Trigger.UNKNOWN_LOW_NO_ESCAPE_DEFUSE: [Action.DRAW],
+    Trigger.UNKNOWN_LOW_NO_ESCAPE_NO_DEFUSE: [Action.DRAW],
+    Trigger.UNKNOWN_MED_ESCAPE_DEFUSE: [Action.DRAW, Action.SKIP, Action.ATTACK],
+    Trigger.UNKNOWN_MED_ESCAPE_NO_DEFUSE: [Action.DRAW, Action.SKIP, Action.ATTACK],
+    Trigger.UNKNOWN_MED_NO_ESCAPE_DEFUSE: [Action.DRAW],
+    Trigger.UNKNOWN_MED_NO_ESCAPE_NO_DEFUSE: [Action.DRAW],
+    Trigger.UNKNOWN_HIGH_ESCAPE_DEFUSE: [Action.DRAW, Action.SKIP, Action.ATTACK],
+    Trigger.UNKNOWN_HIGH_ESCAPE_NO_DEFUSE: [Action.SKIP, Action.ATTACK],
+    Trigger.UNKNOWN_HIGH_NO_ESCAPE_DEFUSE: [Action.DRAW],
+    Trigger.UNKNOWN_HIGH_NO_ESCAPE_NO_DEFUSE: [Action.DRAW],
+    Trigger.UNKNOWN_CRIT_ESCAPE_DEFUSE: [Action.DRAW, Action.SKIP, Action.ATTACK],
+    Trigger.UNKNOWN_CRIT_ESCAPE_NO_DEFUSE: [Action.SKIP, Action.ATTACK],
+    Trigger.UNKNOWN_CRIT_NO_ESCAPE_DEFUSE: [Action.DRAW],
+    Trigger.UNKNOWN_CRIT_NO_ESCAPE_NO_DEFUSE: [Action.DRAW],
+    
+    # See Future
+    Trigger.SEE_LOW_ESCAPE: [Action.SEE_FUTURE, Action.DRAW],
+    Trigger.SEE_LOW_NO_ESCAPE: [Action.SEE_FUTURE, Action.DRAW],
+    Trigger.SEE_MED_ESCAPE: [Action.SEE_FUTURE, Action.DRAW],
+    Trigger.SEE_MED_NO_ESCAPE: [Action.SEE_FUTURE, Action.DRAW],
+    Trigger.SEE_HIGH_ESCAPE: [Action.SEE_FUTURE, Action.DRAW],
+    Trigger.SEE_HIGH_NO_ESCAPE: [Action.SEE_FUTURE, Action.DRAW],
+    
+    # Attacked
+    Trigger.ATTACKED_2_SKIP_ATTACK_DEFUSE: [Action.DRAW, Action.SKIP, Action.ATTACK],
+    Trigger.ATTACKED_2_SKIP_ATTACK_NO_DEFUSE: [Action.SKIP, Action.ATTACK],
+    Trigger.ATTACKED_2_SKIP_NO_ATTACK_DEFUSE: [Action.DRAW, Action.SKIP],
+    Trigger.ATTACKED_2_SKIP_NO_ATTACK_NO_DEFUSE: [Action.SKIP, Action.DRAW],
+    Trigger.ATTACKED_2_NO_SKIP_ATTACK_DEFUSE: [Action.DRAW, Action.ATTACK],
+    Trigger.ATTACKED_2_NO_SKIP_ATTACK_NO_DEFUSE: [Action.ATTACK],
+    Trigger.ATTACKED_2_NOTHING_DEFUSE: [Action.DRAW],
+    Trigger.ATTACKED_2_NOTHING_NO_DEFUSE: [Action.DRAW],
+    Trigger.ATTACKED_3PLUS_ATTACK: [Action.ATTACK],
+    Trigger.ATTACKED_3PLUS_SKIP_NO_ATTACK: [Action.SKIP, Action.DRAW],
+    Trigger.ATTACKED_3PLUS_NOTHING: [Action.DRAW],
+    
+    # Defused (FIX: Simplified to player count)
+    Trigger.DEFUSED_2P: [Action.PLACE_TOP, Action.PLACE_MIDDLE, Action.PLACE_BOTTOM],
+    Trigger.DEFUSED_3P: [Action.PLACE_TOP, Action.PLACE_2ND, Action.PLACE_MIDDLE, Action.PLACE_BOTTOM],
+    Trigger.DEFUSED_4P: [Action.PLACE_TOP, Action.PLACE_2ND, Action.PLACE_3RD, Action.PLACE_BOTTOM],
+    Trigger.DEFUSED_5P: [Action.PLACE_TOP, Action.PLACE_2ND, Action.PLACE_3RD, Action.PLACE_BOTTOM],
+    
+    # Proactive
+    Trigger.PROACTIVE_WEAKEST_ATTACK_LOW: [Action.ATTACK, Action.DRAW],
+    Trigger.PROACTIVE_WEAKEST_ATTACK_HIGH: [Action.ATTACK, Action.DRAW],
+    Trigger.PROACTIVE_STRONGEST_ATTACK_LOW: [Action.DRAW, Action.ATTACK],
+    Trigger.PROACTIVE_STRONGEST_ATTACK_HIGH: [Action.ATTACK, Action.DRAW],
+    Trigger.PROACTIVE_MIDDLE_ATTACK: [Action.ATTACK, Action.DRAW],
+    
+    # Endgame
+    Trigger.ENDGAME_DEFUSE_SKIP_ATTACK: [Action.DRAW, Action.SKIP, Action.ATTACK],
+    Trigger.ENDGAME_DEFUSE_SKIP: [Action.DRAW, Action.SKIP],
+    Trigger.ENDGAME_DEFUSE_ATTACK: [Action.DRAW, Action.ATTACK],
+    Trigger.ENDGAME_DEFUSE_ONLY: [Action.DRAW],
+    Trigger.ENDGAME_NO_DEFUSE_SKIP: [Action.SKIP],
+    Trigger.ENDGAME_NO_DEFUSE_ATTACK: [Action.ATTACK],
+    Trigger.ENDGAME_NO_DEFUSE_NOTHING: [Action.DRAW],
+    Trigger.ENDGAME_BOMB_TOP_ESCAPE: [Action.SKIP, Action.ATTACK],
+    Trigger.ENDGAME_BOMB_TOP_DEFUSE: [Action.DRAW],
+    Trigger.ENDGAME_BOMB_TOP_NOTHING: [Action.DRAW],
+}
+
+
+# ============================================================
+# TRIGGER IDENTIFICATION
+# ============================================================
+
+def get_risk_level(prob: float) -> str:
+    if prob < 0.10:
+        return "LOW"
+    elif prob < 0.25:
+        return "MED"
+    elif prob < 0.40:
+        return "HIGH"
+    else:
+        return "CRIT"
+
+
+def get_position(game: Game, player: Player) -> str:
+    alive = game.alive_players()
+    if len(alive) <= 1:
+        return "MIDDLE"
+    
+    totals = [(p.id, p.total()) for p in alive]
+    totals.sort(key=lambda x: x[1])
+    
+    my_total = player.total()
+    min_total = totals[0][1]
+    max_total = totals[-1][1]
+    
+    if my_total == min_total and my_total < max_total:
+        return "WEAKEST"
+    elif my_total == max_total and my_total > min_total:
+        return "STRONGEST"
+    else:
+        return "MIDDLE"
+
+
+def identify_trigger(game: Game, player: Player) -> Optional[Trigger]:
+    """Identify which trigger applies to current state."""
+    
+    # FIX: Check for pending defuse first
+    if game.pending_defuse:
+        alive = len(game.alive_players())
+        if alive <= 2:
+            return Trigger.DEFUSED_2P
+        elif alive == 3:
+            return Trigger.DEFUSED_3P
+        elif alive == 4:
+            return Trigger.DEFUSED_4P
+        else:
+            return Trigger.DEFUSED_5P
+    
+    has_skip = player.has(Card.SKIP)
+    has_attack = player.has(Card.ATTACK)
+    has_shuffle = player.has(Card.SHUFFLE)
+    has_see = player.has(Card.SEE_FUTURE)
+    has_defuse = player.has(Card.DEFUSE)
+    has_escape = has_skip or has_attack
+    
+    bomb_prob = game.bomb_prob()
+    risk = get_risk_level(bomb_prob)
+    alive_count = len(game.alive_players())
+    position = get_position(game, player)
+    
+    is_endgame = alive_count == 2 and game.bombs_in_deck() == 1
+    
+    # Check endgame first
+    if is_endgame:
+        if game.bomb_on_top():
+            if has_escape:
+                return Trigger.ENDGAME_BOMB_TOP_ESCAPE
+            elif has_defuse:
+                return Trigger.ENDGAME_BOMB_TOP_DEFUSE
+            else:
+                return Trigger.ENDGAME_BOMB_TOP_NOTHING
+        else:
+            if has_defuse and has_skip and has_attack:
+                return Trigger.ENDGAME_DEFUSE_SKIP_ATTACK
+            elif has_defuse and has_skip:
+                return Trigger.ENDGAME_DEFUSE_SKIP
+            elif has_defuse and has_attack:
+                return Trigger.ENDGAME_DEFUSE_ATTACK
+            elif has_defuse:
+                return Trigger.ENDGAME_DEFUSE_ONLY
+            elif has_skip:
+                return Trigger.ENDGAME_NO_DEFUSE_SKIP
+            elif has_attack:
+                return Trigger.ENDGAME_NO_DEFUSE_ATTACK
+            else:
+                return Trigger.ENDGAME_NO_DEFUSE_NOTHING
+    
+    # Check under attack
+    if game.turns_left >= 3:
+        if has_attack:
+            return Trigger.ATTACKED_3PLUS_ATTACK
+        elif has_skip:
+            return Trigger.ATTACKED_3PLUS_SKIP_NO_ATTACK
+        else:
+            return Trigger.ATTACKED_3PLUS_NOTHING
+    
+    if game.turns_left == 2:
+        if has_skip and has_attack and has_defuse:
+            return Trigger.ATTACKED_2_SKIP_ATTACK_DEFUSE
+        elif has_skip and has_attack:
+            return Trigger.ATTACKED_2_SKIP_ATTACK_NO_DEFUSE
+        elif has_skip and has_defuse:
+            return Trigger.ATTACKED_2_SKIP_NO_ATTACK_DEFUSE
+        elif has_skip:
+            return Trigger.ATTACKED_2_SKIP_NO_ATTACK_NO_DEFUSE
+        elif has_attack and has_defuse:
+            return Trigger.ATTACKED_2_NO_SKIP_ATTACK_DEFUSE
+        elif has_attack:
+            return Trigger.ATTACKED_2_NO_SKIP_ATTACK_NO_DEFUSE
+        elif has_defuse:
+            return Trigger.ATTACKED_2_NOTHING_DEFUSE
+        else:
+            return Trigger.ATTACKED_2_NOTHING_NO_DEFUSE
+    
+    # Check bomb visible
+    bomb_pos = game.bomb_in_top_n(3)
+    if bomb_pos == 1:  # Bomb on top
+        if has_skip and has_defuse:
+            return Trigger.BOMB_TOP_SKIP_DEFUSE
+        elif has_skip:
+            return Trigger.BOMB_TOP_SKIP_NO_DEFUSE
+        elif has_attack and has_defuse:
+            return Trigger.BOMB_TOP_NO_SKIP_ATTACK_DEFUSE
+        elif has_attack:
+            return Trigger.BOMB_TOP_NO_SKIP_ATTACK_NO_DEFUSE
+        elif has_shuffle and has_defuse:
+            return Trigger.BOMB_TOP_NO_SKIP_NO_ATTACK_SHUFFLE_DEFUSE
+        elif has_shuffle:
+            return Trigger.BOMB_TOP_NO_SKIP_NO_ATTACK_SHUFFLE_NO_DEFUSE
+        elif has_defuse:
+            return Trigger.BOMB_TOP_NOTHING_DEFUSE
+        else:
+            return Trigger.BOMB_TOP_NOTHING_NO_DEFUSE
+    
+    elif bomb_pos == 2:
+        if has_escape:
+            return Trigger.BOMB_2ND_HAS_ACTIONS
+        else:
+            return Trigger.BOMB_2ND_NO_ACTIONS
+    
+    elif bomb_pos == 3:
+        if has_escape:
+            return Trigger.BOMB_3RD_HAS_ACTIONS
+        else:
+            return Trigger.BOMB_3RD_NO_ACTIONS
+    
+    # Check if should use See Future
+    if has_see and len(game.known_top) == 0:
+        if risk == "LOW":
+            return Trigger.SEE_LOW_ESCAPE if has_escape else Trigger.SEE_LOW_NO_ESCAPE
+        elif risk == "MED":
+            return Trigger.SEE_MED_ESCAPE if has_escape else Trigger.SEE_MED_NO_ESCAPE
+        else:
+            return Trigger.SEE_HIGH_ESCAPE if has_escape else Trigger.SEE_HIGH_NO_ESCAPE
+    
+    # Proactive decisions (only if have attack and no known bomb)
+    if has_attack and len(game.known_top) == 0:
+        if position == "WEAKEST":
+            if risk in ["HIGH", "CRIT"]:
+                return Trigger.PROACTIVE_WEAKEST_ATTACK_HIGH
+            else:
+                return Trigger.PROACTIVE_WEAKEST_ATTACK_LOW
+        elif position == "STRONGEST":
+            if risk in ["HIGH", "CRIT"]:
+                return Trigger.PROACTIVE_STRONGEST_ATTACK_HIGH
+            else:
+                return Trigger.PROACTIVE_STRONGEST_ATTACK_LOW
+        else:
+            return Trigger.PROACTIVE_MIDDLE_ATTACK
+    
+    # Unknown bomb position
+    if risk == "LOW":
+        if has_escape and has_defuse:
+            return Trigger.UNKNOWN_LOW_ESCAPE_DEFUSE
+        elif has_escape:
+            return Trigger.UNKNOWN_LOW_ESCAPE_NO_DEFUSE
+        elif has_defuse:
+            return Trigger.UNKNOWN_LOW_NO_ESCAPE_DEFUSE
+        else:
+            return Trigger.UNKNOWN_LOW_NO_ESCAPE_NO_DEFUSE
+    elif risk == "MED":
+        if has_escape and has_defuse:
+            return Trigger.UNKNOWN_MED_ESCAPE_DEFUSE
+        elif has_escape:
+            return Trigger.UNKNOWN_MED_ESCAPE_NO_DEFUSE
+        elif has_defuse:
+            return Trigger.UNKNOWN_MED_NO_ESCAPE_DEFUSE
+        else:
+            return Trigger.UNKNOWN_MED_NO_ESCAPE_NO_DEFUSE
+    elif risk == "HIGH":
+        if has_escape and has_defuse:
+            return Trigger.UNKNOWN_HIGH_ESCAPE_DEFUSE
+        elif has_escape:
+            return Trigger.UNKNOWN_HIGH_ESCAPE_NO_DEFUSE
+        elif has_defuse:
+            return Trigger.UNKNOWN_HIGH_NO_ESCAPE_DEFUSE
+        else:
+            return Trigger.UNKNOWN_HIGH_NO_ESCAPE_NO_DEFUSE
+    else:  # CRIT
+        if has_escape and has_defuse:
+            return Trigger.UNKNOWN_CRIT_ESCAPE_DEFUSE
+        elif has_escape:
+            return Trigger.UNKNOWN_CRIT_ESCAPE_NO_DEFUSE
+        elif has_defuse:
+            return Trigger.UNKNOWN_CRIT_NO_ESCAPE_DEFUSE
+        else:
+            return Trigger.UNKNOWN_CRIT_NO_ESCAPE_NO_DEFUSE
+
+
+# ============================================================
+# ACTION EXECUTION (FIXED)
+# ============================================================
+
+def execute_action(game: Game, player: Player, action: Action) -> bool:
+    """
+    Execute action. Returns True if turn ended.
+    FIX: Placement actions now work correctly.
+    """
+    
+    if action == Action.DRAW:
+        card, exploded = game.draw_card(player)
+        if game.pending_defuse:
+            # Need placement decision - don't advance turn yet
+            return False
+        game.advance_turn()
+        return True
+    
+    elif action == Action.SKIP:
+        game.play_skip(player)
+        return True
+    
+    elif action == Action.ATTACK:
+        game.play_attack(player)
+        return True
+    
+    elif action == Action.SHUFFLE:
+        game.play_shuffle(player)
+        # Still need to draw after shuffle
+        return False
+    
+    elif action == Action.SEE_FUTURE:
+        game.play_see_future(player)
+        # Still need another action
+        return False
+    
+    # FIX: Placement actions now implemented
+    elif action == Action.PLACE_TOP:
+        game.place_bomb_for_player(1)  # Next player
+        game.advance_turn()
+        return True
+    
+    elif action == Action.PLACE_2ND:
+        game.place_bomb_for_player(2)  # Player after next
+        game.advance_turn()
+        return True
+    
+    elif action == Action.PLACE_3RD:
+        game.place_bomb_for_player(3)
+        game.advance_turn()
+        return True
+    
+    elif action == Action.PLACE_MIDDLE:
+        pos = len(game.deck) // 2
+        game.place_bomb(pos)
+        game.advance_turn()
+        return True
+    
+    elif action == Action.PLACE_BOTTOM:
+        game.place_bomb(0)  # 0 = bottom of deck
+        game.advance_turn()
+        return True
+    
+    return False
+
+
+# ============================================================
+# PLAYER AI
+# ============================================================
+
+def random_play(game: Game, player: Player):
+    """Random opponent AI."""
+    
+    # Handle pending defuse
+    if game.pending_defuse:
+        game.place_bomb(random.randint(0, len(game.deck)))
+        game.advance_turn()
+        return
+    
+    # Sometimes use see future
+    if player.has(Card.SEE_FUTURE) and random.random() < 0.3:
+        game.play_see_future(player)
+    
+    # React to bomb on top
+    if game.bomb_on_top():
+        if player.has(Card.SKIP):
+            game.play_skip(player)
+            return
+        if player.has(Card.ATTACK):
+            game.play_attack(player)
+            return
+        if player.has(Card.SHUFFLE):
+            game.play_shuffle(player)
+    
+    # High risk escape
+    if game.bomb_prob() > 0.3:
+        if player.has(Card.ATTACK) and random.random() < 0.4:
+            game.play_attack(player)
+            return
+        if player.has(Card.SKIP) and random.random() < 0.4:
+            game.play_skip(player)
+            return
+    
+    # Draw
+    card, exploded = game.draw_card(player)
+    if game.pending_defuse:
+        game.place_bomb(random.randint(0, len(game.deck)))
+    if not game.is_over():
+        game.advance_turn()
+
+
+def policy_play(game: Game, player: Player, policy: Dict[Trigger, Action]):
+    """Play using policy. FIX: Better action chaining."""
+    
+    max_actions = 5  # Prevent infinite loops
+    
+    for _ in range(max_actions):
+        if game.is_over():
+            return
+        
+        trigger = identify_trigger(game, player)
+        
+        if trigger is None:
+            # No trigger matched - just draw
+            card, exploded = game.draw_card(player)
+            if game.pending_defuse:
+                game.place_bomb(random.randint(0, len(game.deck)))
+            if not game.is_over():
+                game.advance_turn()
+            return
+        
+        action = policy.get(trigger)
+        if action is None:
+            # Trigger not in policy - use first valid action
+            valid_actions = TRIGGER_ACTIONS.get(trigger, [Action.DRAW])
+            action = valid_actions[0]
+        
+        valid_actions = TRIGGER_ACTIONS.get(trigger, [Action.DRAW])
+        if action not in valid_actions:
+            action = valid_actions[0]
+        
+        turn_ended = execute_action(game, player, action)
+        
+        if turn_ended:
+            return
+        
+        # Action didn't end turn - need follow-up
+        # (SEE_FUTURE, SHUFFLE, or pending DEFUSE)
+
+
+# ============================================================
+# SIMULATION
+# ============================================================
+
+def simulate_game(num_players: int, my_id: int, policy: Dict[Trigger, Action]) -> bool:
+    """Simulate one game. Returns True if my_id wins."""
+    
+    game = Game(num_players)
+    game.setup()
+    
+    for _ in range(500):
+        if game.is_over():
+            break
+        
+        player = game.current_player()
+        if player is None:
+            break
+        
+        if player.id == my_id:
+            policy_play(game, player, policy)
+        else:
+            random_play(game, player)
+    
+    return game.winner == my_id
+
+
+def evaluate_trigger_action(trigger: Trigger, action: Action, num_players: int,
+                            simulations: int, base_policy: Dict[Trigger, Action]) -> Tuple[float, int]:
+    """
+    Evaluate win rate for a specific trigger-action pair.
+    FIX: Uses base_policy for all other decisions.
+    Returns (win_rate, valid_games).
+    """
+    
+    # Create policy: base_policy + override for this trigger
+    policy = base_policy.copy()
+    policy[trigger] = action
+    
+    wins = 0
+    valid_games = 0
+    my_id = 0
+    
+    for _ in range(simulations):
+        game = Game(num_players)
+        game.setup()
+        
+        # Play until this trigger is reached (or game ends)
+        trigger_found = False
+        for _ in range(200):
+            if game.is_over():
+                break
+            
+            player = game.current_player()
+            if player is None:
+                break
+            
+            if player.id == my_id:
+                current_trigger = identify_trigger(game, player)
+                if current_trigger == trigger:
+                    trigger_found = True
+                    break
+                else:
+                    # Use base policy for other triggers
+                    policy_play(game, player, base_policy)
+            else:
+                random_play(game, player)
+        
+        if not trigger_found or game.is_over():
+            continue
+        
+        valid_games += 1
+        
+        # Continue game with our test policy
+        for _ in range(300):
+            if game.is_over():
+                break
+            
+            player = game.current_player()
+            if player is None:
+                break
+            
+            if player.id == my_id:
+                policy_play(game, player, policy)
+            else:
+                random_play(game, player)
+        
+        if game.winner == my_id:
+            wins += 1
+    
+    if valid_games == 0:
+        return 0.0, 0
+    
+    return wins / valid_games, valid_games
+
+
+# ============================================================
+# MAIN ANALYSIS
+# ============================================================
+
+def analyze_all_triggers(num_players: int = 3, simulations: int = 500,
+                         base_policy: Dict[Trigger, Action] = None) -> Tuple[Dict, Dict]:
+    """Analyze all triggers and find optimal actions."""
+    
+    if base_policy is None:
+        base_policy = {}
+    
+    print("=" * 70)
+    print(f"ANALYZING ALL TRIGGERS ({num_players} players, {simulations} sims each)")
+    print("=" * 70)
+    
+    results = {}
+    optimal_policy = base_policy.copy()
+    
+    triggers = list(TRIGGER_ACTIONS.keys())
+    total = len(triggers)
+    
+    for i, trigger in enumerate(triggers):
+        actions = TRIGGER_ACTIONS[trigger]
+        
+        print(f"\n[{i+1}/{total}] {trigger.name}")
+        print(f"  Actions: {[a.name for a in actions]}")
+        
+        action_results = {}
+        best_action = actions[0]
+        best_rate = -1
+        best_count = 0
+        
+        for action in actions:
+            win_rate, count = evaluate_trigger_action(
+                trigger, action, num_players, simulations, base_policy
+            )
+            action_results[action] = (win_rate, count)
+            
+            marker = ""
+            if win_rate > best_rate:
+                best_rate = win_rate
+                best_action = action
+                best_count = count
+                marker = " <-- BEST"
+            
+            print(f"    {action.name:15}: {win_rate*100:5.1f}% (n={count}){marker}")
+        
+        results[trigger] = action_results
+        optimal_policy[trigger] = best_action
+    
+    return results, optimal_policy
+
+
+def validate_policy(policy: Dict[Trigger, Action], num_games: int = 2000):
+    """Validate full policy."""
+    
+    print("\n" + "=" * 70)
+    print("POLICY VALIDATION")
+    print("=" * 70)
+    
+    for num_players in [2, 3, 4]:
+        wins = 0
+        
+        for _ in range(num_games):
+            if simulate_game(num_players, 0, policy):
+                wins += 1
+        
+        baseline = 1.0 / num_players
+        actual = wins / num_games
+        adv = actual - baseline
+        
+        status = "✓" if adv > 0 else "✗"
+        print(f"\n{num_players} Players: {status}")
+        print(f"  Baseline: {baseline*100:.1f}%")
+        print(f"  Policy:   {actual*100:.1f}%")
+        print(f"  Advantage: {adv*100:+.1f}%")
+
+
+def print_policy_summary(policy: Dict[Trigger, Action]):
+    """Print policy in readable format."""
+    
+    print("\n" + "=" * 70)
+    print("OPTIMAL POLICY SUMMARY")
+    print("=" * 70)
+    
+    categories = {
+        "Bomb Visible": [t for t in policy if "BOMB_" in t.name and "UNKNOWN" not in t.name],
+        "Bomb Unknown": [t for t in policy if "UNKNOWN_" in t.name],
+        "See Future": [t for t in policy if "SEE_" in t.name],
+        "Under Attack": [t for t in policy if "ATTACKED_" in t.name],
+        "Defused": [t for t in policy if "DEFUSED_" in t.name],
+        "Proactive": [t for t in policy if "PROACTIVE_" in t.name],
+        "Endgame": [t for t in policy if "ENDGAME_" in t.name],
+    }
+    
+    for cat_name, triggers in categories.items():
+        if not triggers:
+            continue
+        print(f"\n{cat_name}:")
+        print("-" * 50)
+        for t in triggers:
+            print(f"  {t.name:40} -> {policy[t].name}")
+
+
+def save_results(results: Dict, policy: Dict, filename: str):
+    """Save results to file."""
+    
+    data = {
+        "results": {
+            t.name: {a.name: {"win_rate": v[0], "samples": v[1]} for a, v in actions.items()}
+            for t, actions in results.items()
+        },
+        "policy": {t.name: a.name for t, a in policy.items()}
+    }
+    
+    with open(filename, 'w') as f:
+        json.dump(data, f, indent=2)
+    
+    print(f"\nResults saved to {filename}")
+
+
+# ============================================================
+# MAIN
+# ============================================================
+
+def main():
+    start = time.time()
+    
+    print("EXPLODING KITTENS - TRIGGER ANALYSIS (FIXED)")
+    print("=" * 70)
+    print(f"Triggers: {len(TRIGGER_ACTIONS)}")
+    print("=" * 70)
+    
+    # Configuration
+    QUICK_MODE = False
+    
+    if QUICK_MODE:
+        sims = 300
+        val_games = 1000
+        print("\n*** QUICK MODE (300 sims per action) ***\n")
+    else:
+        sims = 10000
+        val_games = 5000 
+        print("\n*** FULL MODE (2000 sims per action) ***\n")
+    
+    # First pass: Find initial policy
+    print("\n[PASS 1] Finding initial policy...")
+    results1, policy1 = analyze_all_triggers(num_players=3, simulations=sims)
+    
+    # Second pass: Refine with better base policy
+    print("\n\n[PASS 2] Refining with learned policy...")
+    results2, policy2 = analyze_all_triggers(num_players=3, simulations=sims, base_policy=policy1)
+    
+    # Print summary
+    print_policy_summary(policy2)
+    
+    # Validate
+    validate_policy(policy2, num_games=val_games)
+    
+    # Save
+    save_results(results2, policy2, "trigger_results_fixed.json")
+    
+    elapsed = time.time() - start
+    print(f"\n\nTotal time: {elapsed:.1f} seconds ({elapsed/60:.1f} minutes)")
+
+
+if __name__ == "__main__":
+    main()
